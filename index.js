@@ -1,17 +1,22 @@
 const {applyMiddleware, compose, createStore, combineReducers} = require('redux');
 const remoteDevTools = require('remote-redux-devtools');
-const thunk = require('redux-thunk');
-const remotedev = require('remotedev-server');
 const events = require('events');
-const child_process = require('child_process');
 const _ = require('lodash');
-const fs = require('fs');
 const path = require('path');
 const utilities = require('./util-helper');
 const logger = require('./logger');
+const uuid = require('uuid');
 const syncStateToFileSystem = require('./sync-state-to-filesystem');
 
 const toUnderscore = (input) => input.split(/(?=[A-Z])/).join('_').toUpperCase();
+const GlobalErrors = [
+  EvalError,
+  Error,
+  RangeError,
+  ReferenceError,
+  SyntaxError,
+  TypeError
+];
 class Warning extends Error{
   constructor(title, message){
     super();
@@ -24,7 +29,8 @@ class Warning extends Error{
     this.name = 'Warning'
   }
 }
-class NodeReduxInterface extends events{
+//class DecoratedError extends
+class NodeReduxComponentPubSubInterface extends events{
   constructor(){
     super();
     this.server = null;
@@ -33,17 +39,19 @@ class NodeReduxInterface extends events{
     this.reducers = {};
     this.store = {};
     this.state = {};
+    this.statelessComponents = {};
     this.ready = false;
     this.middleware = [];
+    this.bindedReducers = [];
     this.options = {
       suppressErrors: false,
       suppressWarnings: false,
-      importBuiltin: true,
-      ignoreFilesystemOutput: false,
       syncStateToFileSystem: false,
       ignoreChildProcessOutput: false,
       syncStateToFileSystemPath:null,
       enableLogger: true,
+      dispatchBeforeLocalReducer: true,
+      enablePromiseRejectionEvent: true,
       component:{
         stateRef:'__STATE__',
         builtInRef:'__BUILTIN__',
@@ -53,6 +61,83 @@ class NodeReduxInterface extends events{
       }
     }
     this.builtinUtilities = new utilities(this);
+  }
+  addGlobalErrors(errors){
+    if(Array.isArray(errors)){
+      GlobalErrors = GlobalErrors.concat(errors);
+    }else{
+      GlobalErrors.push(errors);
+    }
+  }
+  async(promiseType=Promise){
+    let self = this;
+    let trace = new Error();
+    return {
+      as(eventName, callback){
+        if(typeof callback === 'function' && typeof promiseType === 'function'){
+          promiseType(callback);
+          return;
+        }else if((promiseType instanceof Promise) && typeof callback === 'function'){
+          promiseType.then((result) => {
+            let o = {
+              action: `${eventName.toUpperCase()}_PROMISE_RESOLVED`,
+              payload: result
+            }
+            self.dispatch(o);
+            callback(null, result);
+          }).catch(error => {
+            self.handlePromiseRejection(error, trace.stack);
+            let o = {
+              action: `${eventName.toUpperCase()}_PROMISE_ERROR`,
+              error
+            }
+            
+            self.dispatch(o);
+            callback(error);
+          });
+          return;
+        }
+        if((promiseType instanceof Promise) && typeof eventName === 'string' && eventName.length){
+          return new Promise((resolve, reject) => {
+            promiseType.then((result) => {
+              let o = {
+                action: `${eventName.toUpperCase()}_PROMISE_RESOLVED`,
+                payload: result
+              }
+              self.dispatch(o);
+              resolve(result);
+            }).catch(error => {
+              self.handlePromiseRejection(error, trace.stack);
+              let o = {
+                action: `${eventName.toUpperCase()}_PROMISE_ERROR`,
+                error
+              }
+              self.dispatch(o);
+              reject(error);
+            });
+            
+          });
+        }else{
+          return new Promise((_, reject)=>{
+            let o = {
+              type: `${eventName.toUpperCase()}_PROMISE_ERROR`,
+              error: new Error(`"${eventName}" is not a promise`)
+            }
+            if(!eventName){
+              o.error = new Error(`"eventName" is not a string`);
+            }
+            self.logErr(o.error);
+            reject(reject);
+          })
+        }
+      }
+    }
+  }
+  /**
+   * Getters
+   */
+  get componentList(){
+    return Object.keys(this.subscribersMap);
   }
   logErr(){
     if(!this.options.suppressErrors){
@@ -100,7 +185,7 @@ class NodeReduxInterface extends events{
       return this.logWarn('No reducers were set when creating store');
     }
     let allReducers = combineReducers(this.reducers);
-    let allMiddleware = compose(...this.middleware);
+    let allMiddleware = applyMiddleware(...this.middleware);
     this.store = createStore(allReducers, this.state, allMiddleware);
     if(this.options.syncStateToFileSystem && this.options.syncStateToFileSystemPath){
       this.store.subscribe(()=>{
@@ -194,7 +279,6 @@ class NodeReduxInterface extends events{
 
   }
   dispatch(dispatchEvent, options){
-
     let restricted = [];
     let prepareEvents = this.subscribers.filter(component => {
       let name = component.name;
@@ -217,9 +301,31 @@ class NodeReduxInterface extends events{
       }
     });
     prepareEvents.forEach(component => {
-      component.prototype[this.options.component.listenerRef](dispatchEvent);
+      if(typeof component.prototype[this.options.component.listenerRef] === 'function'){
+        component.prototype[this.options.component.listenerRef](dispatchEvent);
+      }
     });
-    this.store.dispatch(dispatchEvent);
+    if(this.options.dispatchBeforeLocalReducer){
+      this.store.dispatch({
+        type: dispatchEvent.action,
+        payload: dispatchEvent.payload
+      });
+    }
+    this.bindedReducers.forEach(boundReducer => {
+      let name = `${boundReducer.name.toUpperCase()}_COMPONENT`;
+      if(dispatchEvent.action.indexOf(name) >= 0){
+        let newEvent = boundReducer.reducer(this.store.getState(), dispatchEvent);
+        if(newEvent && (newEvent.hasOwnProperty('action') || newEvent.hasOwnProperty('type'))){
+          dispatchEvent = newEvent;
+        }
+      }
+    });
+    for(const statelessComponent in this.statelessComponents){
+      let comp = this.statelessComponents[statelessComponent];
+      if(comp.event === dispatchEvent.action && typeof comp.fn === 'function'){
+        comp.fn(dispatchEvent);
+      }
+    }
   }
   updateStoreVIAComponent(componentName, optionalPayload){
     let internalStoreName = `${toUnderscore(componentName)}_COMPONENT`;
@@ -232,7 +338,9 @@ class NodeReduxInterface extends events{
     let exclude = [componentName];
     if(emitLocally){
       let index = this.subscribersMap[componentName].subscriberIndex;
-      this.subscribers[index].prototype[this.options.component.listenerRef](dispatchEvent);
+      if(typeof this.subscribers[index].prototype[this.options.component.listenerRef]){
+        this.subscribers[index].prototype[this.options.component.listenerRef](dispatchEvent);
+      }
       exclude = [];
     }
     this.dispatch(dispatchEvent, {exclude});
@@ -241,7 +349,20 @@ class NodeReduxInterface extends events{
     if(classComponent.hasOwnProperty('name') && !classComponent.name){
       return this.logWarn('Can not add component to store. A component needs to be named class/function');
     }
-
+    let name = classComponent.name;
+    if(options.reducer){
+      if(options.bindContext){
+        this.bindedReducers.push({
+          name: name,
+          reducer: options.reducer.bind(classComponent.prototype)
+        });
+      }else{
+        this.bindedReducers.push({
+          name: name,
+          reducer: options.reducer
+        });
+      }
+    }
     const isSubscriber = this.subscribersMap.hasOwnProperty(classComponent.name);
     if(isSubscriber){
       return this.logWarn(`${classComponent.name} already exists in store`);
@@ -273,6 +394,33 @@ class NodeReduxInterface extends events{
     }
     return this.store.getState();
   }
+  handlePromiseRejection(err, trace){
+    const isGlobalError = GlobalErrors.findIndex(e => (err instanceof e));
+    if(isGlobalError >= 0){
+      err.stack = trace;
+      this.emit('PromiseRejection', err);
+    }
+  }
+  stateless(listener, options={}){
+    if(typeof listener !== 'function') return this.logWarn(`Unable to create stateless component from a '${typeof listener}'. Must be a function`);
+    const eventName = options.onEvent;
+    let id = uuid.v4();
+    this.statelessComponents[id] = {
+      event: eventName,
+      fn: listener
+    }
+    return id;
+  }
+  unbindStateless(id){
+    for(let compID in this.statelessComponents){
+      if(compID === id){
+        delete this.statelessComponents[compID];
+        return true;
+      }
+    }
+    return false;
+  }
+
 }
 
-module.exports = new NodeReduxInterface();
+module.exports = new NodeReduxComponentPubSubInterface();
