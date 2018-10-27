@@ -1,11 +1,15 @@
 {
   "name": "node-redux-components",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Node-redux-components is a event emitter(pub/sub) system based around using redux for state management in a Object oriented architecture",
   "main": "index.js",
   "author": "michael wheeler",
   "license": "MIT",
-  "homepage" : "https://github.com/Echo-Peak/node-redux",
+  "homepage" : "https://github.com/Echo-Peak/node-redux/blob/master/README.md",
+  "repository": {
+    "type" : "git",
+    "url" : "https://github.com/Echo-Peak/node-redux"
+  },
   "devDependencies": {
     "babel": "^6.23.0",
     "babel-core": "^6.26.3",
