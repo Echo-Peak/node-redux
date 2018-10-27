@@ -29,8 +29,8 @@ class Warning extends Error{
     this.name = 'Warning'
   }
 }
-//class DecoratedError extends
-class NodeReduxComponentPubSubInterface extends events{
+
+class NodeReduxComponentsInterface extends events{
   constructor(){
     super();
     this.server = null;
@@ -47,7 +47,6 @@ class NodeReduxComponentPubSubInterface extends events{
       suppressErrors: false,
       suppressWarnings: false,
       syncStateToFileSystem: false,
-      ignoreChildProcessOutput: false,
       syncStateToFileSystemPath:null,
       enableLogger: true,
       dispatchBeforeLocalReducer: true,
@@ -423,4 +422,4 @@ class NodeReduxComponentPubSubInterface extends events{
 
 }
 
-module.exports = new NodeReduxComponentPubSubInterface();
+module.exports = new NodeReduxComponentsInterface();
