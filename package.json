@@ -1,7 +1,7 @@
 {
-  "name": "node-redux-component-pubsub",
-  "version": "0.9.9",
-  "description": "Node-redux-component-pubsub is a event emitter(pub/sub) system based around using redux for state management in a Object oriented architecure",
+  "name": "node-redux-components",
+  "version": "1.0.0",
+  "description": "Node-redux-components is a event emitter(pub/sub) system based around using redux for state management in a Object oriented architecure",
   "main": "index.js",
   "author": "michael wheeler",
   "license": "MIT",
